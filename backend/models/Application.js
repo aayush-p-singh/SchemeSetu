@@ -26,6 +26,28 @@ const applicationSchema = new mongoose.Schema(
       default: [],
     },
     submittedAt: { type: Date },
+    // Add these fields inside your applicationSchema definition in backend/models/Application.js:
+referenceId: {
+  type: String,
+  unique: true,
+  sparse: true,
+},
+portalUrl: {
+  type: String,
+  default: 'https://www.myscheme.gov.in/',
+},
+govApplicationNumber: {
+  type: String,
+  trim: true,
+  default: '',
+},
+formSubmission: {
+  nomineeName: { type: String, trim: true },
+  nomineeRelation: { type: String, trim: true },
+  worksiteName: { type: String, trim: true },
+  declarationAccepted: { type: Boolean, default: false },
+  submittedAt: { type: Date },
+},
   },
   { timestamps: true }
 );

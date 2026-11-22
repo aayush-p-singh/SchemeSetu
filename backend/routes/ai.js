@@ -228,8 +228,180 @@ router.get('/news', requireAuth, async (req, res) => {
     newsCache = { data: FALLBACK_WELFARE_NEWS, expiresAt: Date.now() + 15 * 60 * 1000 };
     return res.json(FALLBACK_WELFARE_NEWS);
   }
+  
+});
+router.post('/chat', requireAuth, async (req, res, next) => {
+  try {
+    const message = String(req.body?.message || '').trim();
+    if (!message) {
+      return res.status(400).json({ success: false, message: 'Message is required' });
+    }
+
+    const apiKey = process.env.SARVAM_API_KEY;
+    const baseUrl = (process.env.SARVAM_API_URL || 'https://api.sarvam.ai').replace(/\/$/, '');
+    if (!apiKey) {
+      return res.status(500).json({ success: false, message: 'SARVAM_API_KEY is not configured' });
+    }
+
+    const systemPrompt = [
+      'You are SchemeMitra, a helpful welfare and labour compliance assistant for Indian workers and contractors on SchemeSetu.',
+      `Current user: ${req.user?.name || 'User'} (role: ${req.user?.role || 'laborer'}, trade: ${req.user?.trade || 'N/A'}, state: ${req.user?.state || 'India'}).`,
+      'Be clear, accurate, and concise. Use Markdown (**bold** and bullet points) where helpful.',
+      'Clarify when needed that SchemeSetu helps check eligibility, organize documents/claims, and hand off to official government portals rather than directly submitting into government databases.',
+    ].join(' ');
+
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-subscription-key': apiKey,
+      },
+      body: JSON.stringify({
+        model: 'sarvam-105b',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: message },
+        ],
+        temperature: 0.4,
+      }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return res.status(response.status).json({
+        success: false,
+        message: data?.message || data?.error || `Sarvam chat failed (${response.status})`,
+      });
+    }
+
+    const reply =
+      data?.choices?.[0]?.message?.content ||
+      data?.reply ||
+      'I could not generate a response right now.';
+
+    return res.json({ success: true, reply });
+  } catch (err) {
+    next(err);
+  }
 });
 
+router.post('/voice', requireAuth, async (req, res, next) => {
+  try {
+    const { audio_base64, language = 'hi', tts = true } = req.body || {};
+    if (!audio_base64) {
+      return res.status(400).json({ success: false, message: 'audio_base64 is required' });
+    }
+
+    const gnaniKey = process.env.GNANI_API_KEY;
+    const sttUrl = process.env.GNANI_STT_URL || 'https://api.vachana.ai/stt/v3';
+    const ttsUrl = process.env.GNANI_TTS_URL || 'https://api.vachana.ai/api/v1/lls/inference';
+    const sarvamKey = process.env.SARVAM_API_KEY;
+    const sarvamBase = (process.env.SARVAM_API_URL || 'https://api.sarvam.ai').replace(/\/$/, '');
+
+    if (!gnaniKey || !sarvamKey) {
+      return res.status(500).json({ success: false, message: 'Missing GNANI_API_KEY or SARVAM_API_KEY' });
+    }
+
+    // 1. Speech-to-Text via Gnani AI
+    const sttRes = await fetch(sttUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': gnaniKey,
+        Authorization: `Bearer ${gnaniKey}`,
+      },
+      body: JSON.stringify({
+        audio_base64,
+        language,
+        sample_rate: 16000,
+      }),
+    });
+
+    const sttData = await sttRes.json().catch(() => ({}));
+    if (!sttRes.ok) {
+      return res.status(sttRes.status).json({
+        success: false,
+        message: sttData?.message || sttData?.error || `Gnani STT failed (${sttRes.status})`,
+      });
+    }
+
+    const transcript =
+      sttData?.transcript || sttData?.text || sttData?.data?.transcript || '';
+
+    if (!transcript.trim()) {
+      return res.json({
+        success: true,
+        transcript: '',
+        reply: 'I could not catch any clear speech. Please try speaking again closer to your microphone.',
+        audio_base64: '',
+      });
+    }
+
+    // 2. Reason over transcript via Sarvam AI
+    const chatRes = await fetch(`${sarvamBase}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-subscription-key': sarvamKey,
+      },
+      body: JSON.stringify({
+        model: 'sarvam-105b',
+        messages: [
+          {
+            role: 'system',
+            content: `You are SchemeMitra, a voice welfare & labour compliance assistant for ${req.user?.name || 'a user'} (${req.user?.role || 'laborer'}) in ${req.user?.state || 'India'}. Respond clearly and concisely, matching the user's language (${language}) when appropriate.`,
+          },
+          { role: 'user', content: transcript },
+        ],
+        temperature: 0.4,
+      }),
+    });
+
+    const chatData = await chatRes.json().catch(() => ({}));
+    const reply =
+      chatData?.choices?.[0]?.message?.content ||
+      chatData?.reply ||
+      'Processed your voice query.';
+
+    // 3. Optional Text-to-Speech via Gnani AI
+    let replyAudioBase64 = '';
+    if (tts && reply) {
+      try {
+        const plainText = reply.replace(/[*#`-]/g, '').slice(0, 500);
+        const ttsRes = await fetch(ttsUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': gnaniKey,
+            Authorization: `Bearer ${gnaniKey}`,
+          },
+          body: JSON.stringify({
+            text: plainText,
+            language,
+            sample_rate: 24000,
+          }),
+        });
+        if (ttsRes.ok) {
+          const ttsData = await ttsRes.json().catch(() => ({}));
+          replyAudioBase64 =
+            ttsData?.audio_base64 || ttsData?.audio || ttsData?.data?.audio_base64 || '';
+        }
+      } catch {
+        // Text reply still succeeds even if TTS synthesis is skipped
+      }
+    }
+
+    return res.json({
+      success: true,
+      transcript,
+      reply,
+      audio_base64: replyAudioBase64,
+      audio_mime: 'audio/wav',
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 
 module.exports = router;
