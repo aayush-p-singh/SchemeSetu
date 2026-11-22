@@ -20,7 +20,17 @@ import {
   Briefcase,
   X,
 } from 'lucide-react';
-import { apiRequest, sanitizeField, validateVaultFields, useAuth } from '../lib/core';
+import {
+  apiRequest,
+  sanitizeField,
+  validateVaultFields,
+  useAuth,
+  downloadClaimDossier,
+  printClaimDossier,
+  downloadContractorComplianceCsv,
+  printContractorComplianceSummary,
+  simulateSchemeEligibility,
+} from '../lib/core';
 import { AppShell, KpiCard, ProgressRing, VaultInput } from '../components/ShellAndUi';
 
 const TRADES = ['Mason', 'Electrician', 'Plumber', 'Carpenter', 'Welder', 'Painter', 'General Helper'];
@@ -36,7 +46,7 @@ function getOfficialPortalUrl(scheme) {
 }
 
 /* =========================================================
-   1. LANDING PAGE (/)
+1. LANDING PAGE (/)
    ========================================================= */
 export function Landing() {
   const { user, login, register } = useAuth();
@@ -218,7 +228,7 @@ export function Landing() {
 }
 
 /* =========================================================
-   2. LOGIN (/login) & REGISTER (/register)
+2. LOGIN (/login) & REGISTER (/register)
    ========================================================= */
 export function Login() {
   const { login } = useAuth();
@@ -394,7 +404,6 @@ export function Register() {
             <span className="text-sm font-semibold text-zinc-950">SchemeSetu</span>
           </Link>
 
-          {/* Animated Role Switcher */}
           <div className="flex rounded-xl bg-zinc-100 p-1 border border-zinc-200/70">
             {['laborer', 'contractor'].map((r) => (
               <button
@@ -606,7 +615,7 @@ export function Register() {
 }
 
 /* =========================================================
-   3. LABORER COMMAND CENTER (/laborer)
+3. LABORER COMMAND CENTER (/laborer)
    ========================================================= */
 export function LaborerDashboard() {
   const { user, refreshUser } = useAuth();
@@ -648,11 +657,33 @@ export function LaborerDashboard() {
     loadDashboard();
   }, []);
 
+  const updateApplicationMeta = async (appId, payload) => {
+    setApplications((prev) =>
+      prev.map((a) => (a._id === appId ? { ...a, ...payload } : a))
+    );
+    try {
+      const res = await apiRequest(`/laborer/application/${appId}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      });
+      if (res?.application) {
+        setApplications((prev) =>
+          prev.map((a) => (a._id === appId ? { ...a, ...res.application } : a))
+        );
+      }
+      const kpiRes = await apiRequest('/laborer/kpis').catch(() => null);
+      if (kpiRes?.kpis || kpiRes) {
+        setKpis((prev) => ({ ...prev, ...(kpiRes?.kpis || kpiRes) }));
+      }
+    } catch {
+      loadDashboard();
+    }
+  };
+
   const cycleDocStatus = async (appId, doc) => {
     const order = ['pending', 'uploaded', 'verified'];
     const nextStatus = order[(order.indexOf(doc.status) + 1) % order.length];
 
-    // Optimistic UI update
     setApplications((prev) =>
       prev.map((app) =>
         app._id === appId
@@ -697,7 +728,6 @@ export function LaborerDashboard() {
         </div>
       </div>
 
-      {/* Live KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <KpiCard
           label="Eligible Schemes"
@@ -731,7 +761,6 @@ export function LaborerDashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Applications & Interactive Document Checklist */}
         <div className="lg:col-span-2 space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-zinc-950">Applications & Explainable Eligibility</h2>
@@ -789,7 +818,6 @@ export function LaborerDashboard() {
                     </span>
                   </div>
 
-                  {/* Match Score Bar */}
                   <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-zinc-100">
                     <motion.div
                       initial={{ width: 0 }}
@@ -811,7 +839,6 @@ export function LaborerDashboard() {
                     </div>
                   )}
 
-                  {/* Interactive Document Checklist */}
                   {app.documents?.length > 0 && (
                     <div className="mt-4 border-t border-zinc-100 pt-3">
                       <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 mb-2">
@@ -846,13 +873,71 @@ export function LaborerDashboard() {
                       </div>
                     </div>
                   )}
+
+                  <div className="mt-3 flex flex-wrap items-center gap-2 pt-2 border-t border-zinc-100">
+                    <button
+                      type="button"
+                      onClick={() => downloadClaimDossier({ app, scheme: app.schemeId, user })}
+                      className="rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-800 hover:bg-zinc-100 cursor-pointer"
+                    >
+                      Download Dossier (.txt)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => printClaimDossier({ app, scheme: app.schemeId, user })}
+                      className="rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 hover:bg-zinc-50 cursor-pointer"
+                    >
+                      Print Receipt
+                    </button>
+                    {app.referenceId && (
+                      <span className="ml-auto font-mono text-[11px] text-zinc-500">
+                        Ref: {app.referenceId}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-3 pt-3 border-t border-zinc-100 grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-center">
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                        Claim Stage
+                      </label>
+                      <select
+                        value={app.status || 'draft'}
+                        onChange={(e) => updateApplicationMeta(app._id, { status: e.target.value })}
+                        className="w-full rounded-lg border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-800 outline-none focus:border-zinc-900"
+                      >
+                        <option value="draft">Draft</option>
+                        <option value="eligible">Eligible / Prepared</option>
+                        <option value="submitted">Submitted on Portal</option>
+                        <option value="approved">Approved</option>
+                        <option value="rejected">Rejected / Needs Review</option>
+                      </select>
+                    </div>
+
+                    <div className="sm:col-span-2">
+                      <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                        Application Notes / Ack Ref
+                      </label>
+                      <input
+                        type="text"
+                        defaultValue={app.notes || ''}
+                        placeholder="e.g., CSC visit booked or portal ack #..."
+                        onBlur={(e) => {
+                          const nextNote = e.target.value;
+                          if (nextNote !== (app.notes || '')) {
+                            updateApplicationMeta(app._id, { notes: nextNote });
+                          }
+                        }}
+                        className="w-full rounded-lg border border-zinc-200 bg-zinc-50/60 px-2.5 py-1.5 text-xs text-zinc-800 outline-none focus:bg-white focus:border-zinc-900"
+                      />
+                    </div>
+                  </div>
                 </motion.div>
               );
             })
           )}
         </div>
 
-        {/* Live Sarvam Policy News Pulse Card */}
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-zinc-950">Live Policy Updates</h2>
@@ -882,7 +967,7 @@ export function LaborerDashboard() {
 }
 
 /* =========================================================
-   4. SCHEME DISCOVERY (/laborer/schemes)
+4. SCHEME DISCOVERY (/laborer/schemes)
    ========================================================= */
 export function LaborerSchemes() {
   const { user } = useAuth();
@@ -891,7 +976,14 @@ export function LaborerSchemes() {
   const [onlyMatched, setOnlyMatched] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Interactive Application Form Modal State
+  const [simOpen, setSimOpen] = useState(false);
+  const [simProfile, setSimProfile] = useState({
+    age: user?.age ?? 28,
+    monthlyIncome: user?.monthlyIncome ?? 14000,
+    trade: user?.trade ?? 'Mason',
+    bocwRegistered: Boolean(user?.bocwRegistered),
+  });
+
   const [activeScheme, setActiveScheme] = useState(null);
   const [claimForm, setClaimForm] = useState({
     nomineeName: '',
@@ -919,6 +1011,17 @@ export function LaborerSchemes() {
   useEffect(() => {
     loadSchemes();
   }, []);
+
+  useEffect(() => {
+    if (user) {
+      setSimProfile({
+        age: user.age ?? 28,
+        monthlyIncome: user.monthlyIncome ?? 14000,
+        trade: user.trade ?? 'Mason',
+        bocwRegistered: Boolean(user.bocwRegistered),
+      });
+    }
+  }, [user]);
 
   const openApplyModal = (scheme) => {
     setFormError('');
@@ -1024,6 +1127,153 @@ export function LaborerSchemes() {
         </div>
       </div>
 
+      {/* What-If Eligibility Simulator */}
+      <div className="mb-6 rounded-2xl border border-zinc-200 bg-zinc-50/70 p-4 sm:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="rounded-md bg-zinc-900 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white">
+                What-If Simulator
+              </span>
+              <h2 className="text-sm font-semibold text-zinc-950">Scheme Eligibility Simulator</h2>
+            </div>
+            <p className="text-xs text-zinc-500 mt-1">
+              Preview how changing BOCW registration, monthly income, age, or trade changes matched schemes without saving your profile.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {simOpen && (
+              <button
+                type="button"
+                onClick={() =>
+                  setSimProfile({
+                    age: user?.age ?? 28,
+                    monthlyIncome: user?.monthlyIncome ?? 14000,
+                    trade: user?.trade ?? 'Mason',
+                    bocwRegistered: Boolean(user?.bocwRegistered),
+                  })
+                }
+                className="rounded-xl border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 cursor-pointer"
+              >
+                Reset to Profile
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setSimOpen((prev) => !prev)}
+              className="rounded-xl border border-zinc-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-zinc-100 cursor-pointer"
+            >
+              {simOpen ? 'Hide Simulator' : 'Open What-If Check'}
+            </button>
+          </div>
+        </div>
+
+        {simOpen && (() => {
+          const simResults = schemes.map((s) => ({
+            scheme: s,
+            sim: simulateSchemeEligibility(simProfile, s),
+          }));
+          const matchedCount = simResults.filter((x) => x.sim.matched).length;
+          const potentialBenefit = simResults
+            .filter((x) => x.sim.matched)
+            .reduce((sum, x) => sum + (Number(x.scheme.benefitAmount) || 0), 0);
+
+          return (
+            <div className="mt-4 pt-4 border-t border-zinc-200/80 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[11px] font-medium text-zinc-700 mb-1">Simulated Age</label>
+                  <input
+                    type="number"
+                    min="14"
+                    max="80"
+                    value={simProfile.age}
+                    onChange={(e) => setSimProfile({ ...simProfile, age: Number(e.target.value) })}
+                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs outline-none focus:border-zinc-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-zinc-700 mb-1">Monthly Income (₹)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="500"
+                    value={simProfile.monthlyIncome}
+                    onChange={(e) => setSimProfile({ ...simProfile, monthlyIncome: Number(e.target.value) })}
+                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs outline-none focus:border-zinc-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-medium text-zinc-700 mb-1">Trade</label>
+                  <select
+                    value={simProfile.trade}
+                    onChange={(e) => setSimProfile({ ...simProfile, trade: e.target.value })}
+                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs outline-none focus:border-zinc-900"
+                  >
+                    {TRADES.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex items-end">
+                  <label className="flex w-full items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 text-xs font-medium text-zinc-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={simProfile.bocwRegistered}
+                      onChange={(e) => setSimProfile({ ...simProfile, bocwRegistered: e.target.checked })}
+                      className="h-4 w-4 accent-zinc-950"
+                    />
+                    BOCW Registered
+                  </label>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white border border-zinc-200 px-4 py-2.5 text-xs">
+                <div>
+                  Simulated Eligible Schemes:{' '}
+                  <strong className="text-emerald-700">
+                    {matchedCount} / {schemes.length}
+                  </strong>
+                </div>
+                <div>
+                  Simulated Benefit Pool:{' '}
+                  <strong className="text-zinc-950 tabular-nums">
+                    ₹{potentialBenefit.toLocaleString('en-IN')}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                {simResults.map(({ scheme, sim }) => (
+                  <div
+                    key={scheme._id}
+                    className="flex items-center justify-between rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-xs"
+                  >
+                    <div className="pr-2">
+                      <div className="font-medium text-zinc-900">{scheme.title}</div>
+                      <div className="text-[11px] text-zinc-500">{sim.reasons?.[0] || ''}</div>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                        sim.matched ? 'bg-emerald-50 text-emerald-700' : 'bg-zinc-100 text-zinc-600'
+                      }`}
+                    >
+                      {sim.matched ? `Match (${sim.score}%)` : `${sim.score}%`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+
       {loading ? (
         <div className="text-xs text-zinc-500">Evaluating welfare schemes...</div>
       ) : (
@@ -1110,7 +1360,6 @@ export function LaborerSchemes() {
         </div>
       )}
 
-      {/* Official Application Form & Portal Handoff Modal */}
       <AnimatePresence>
         {activeScheme && (
           <motion.div
@@ -1156,7 +1405,7 @@ export function LaborerSchemes() {
                   <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-xs text-zinc-700 space-y-1.5">
                     <div className="font-semibold text-zinc-950">Next Step: Complete Official Government Submission</div>
                     <p>
-                      Click <strong>Copy Pre-Filled Details</strong> below, then launch the official ministry portal to paste your details and complete Aadhaar OTP e-Sign.
+                      Click <strong>Copy Pre-Filled Details</strong> below, then launch the official ministry portal to paste your details and complete verification.
                     </p>
                   </div>
 
@@ -1180,7 +1429,6 @@ export function LaborerSchemes() {
                 </div>
               ) : (
                 <form onSubmit={handleFormSubmit} className="mt-4 space-y-4">
-                  {/* Auto-populated Vault Summary */}
                   <div className="rounded-xl border border-zinc-200 bg-zinc-50/80 p-3.5 text-xs space-y-1.5">
                     <div className="flex items-center justify-between">
                       <span className="font-semibold text-zinc-900">Verified Applicant Profile</span>
@@ -1306,7 +1554,7 @@ export function LaborerSchemes() {
 }
 
 /* =========================================================
-   5. LABORER IDENTITY & COMPLIANCE VAULT (/laborer/profile)
+5. LABORER IDENTITY & COMPLIANCE VAULT (/laborer/profile)
    ========================================================= */
 export function LaborerProfile() {
   const { user, refreshUser } = useAuth();
@@ -1547,7 +1795,7 @@ export function LaborerProfile() {
 }
 
 /* =========================================================
-   6. CONTRACTOR WORKFORCE HUB (/contractor)
+6. CONTRACTOR WORKFORCE HUB (/contractor)
    ========================================================= */
 export function ContractorDashboard() {
   const { user } = useAuth();
@@ -1566,7 +1814,6 @@ export function ContractorDashboard() {
   const [selectedSchemeId, setSelectedSchemeId] = useState('');
   const [bulkStatus, setBulkStatus] = useState('');
 
-  // Onboard Worker Form
   const [workerForm, setWorkerForm] = useState({
     name: '',
     phone: '',
@@ -1671,6 +1918,32 @@ export function ContractorDashboard() {
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
           <button
+            type="button"
+            onClick={() =>
+              downloadContractorComplianceCsv({
+                workers,
+                kpis,
+                contractorName: user?.companyName || user?.name || 'Contractor Hub',
+              })
+            }
+            className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+          >
+            Export CSV
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              printContractorComplianceSummary({
+                workers,
+                kpis,
+                contractorName: user?.companyName || user?.name || 'Contractor Hub',
+              })
+            }
+            className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+          >
+            Print Audit
+          </button>
+          <button
             onClick={() => setShowBulk(true)}
             disabled={selectedIds.length === 0}
             className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-xs font-semibold text-zinc-900 hover:bg-zinc-50 disabled:opacity-40 cursor-pointer"
@@ -1688,7 +1961,6 @@ export function ContractorDashboard() {
         </div>
       </div>
 
-      {/* Live Contractor KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         <KpiCard label="Total Workforce" value={kpis.totalWorkers} icon={Briefcase} subtext="Active site laborers" />
         <KpiCard
@@ -1717,7 +1989,6 @@ export function ContractorDashboard() {
         />
       </div>
 
-      {/* Searchable Workforce Directory */}
       <div className="rounded-2xl border border-zinc-200 bg-white shadow-2xs overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-100 p-5">
           <h2 className="text-sm font-semibold text-zinc-950">Assigned Workforce Directory</h2>
@@ -1805,7 +2076,6 @@ export function ContractorDashboard() {
         </div>
       </div>
 
-      {/* Onboard Worker Modal */}
       <AnimatePresence>
         {showOnboard && (
           <motion.div
@@ -1891,7 +2161,6 @@ export function ContractorDashboard() {
         )}
       </AnimatePresence>
 
-      {/* Bulk Enroll Modal */}
       <AnimatePresence>
         {showBulk && (
           <motion.div
@@ -1943,7 +2212,7 @@ export function ContractorDashboard() {
 }
 
 /* =========================================================
-   7. LIVE SARVAM WELFARE NEWS (/news)
+7. LIVE SARVAM WELFARE NEWS (/news)
    ========================================================= */
 export function PolicyNews() {
   const { askSchemeMitra } = useAuth();
@@ -1994,7 +2263,6 @@ export function PolicyNews() {
         </button>
       </div>
 
-      {/* Category Filter Pills */}
       <div className="flex flex-wrap gap-2 mb-6">
         {categories.map((cat) => (
           <button
