@@ -3,7 +3,10 @@ const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 
-const CORS_ORIGIN = 'http://localhost:5173';
+const allowedOrigins = [
+  'https://schemesetudyog.netlify.app',
+  'http://localhost:5173',
+];
 
 function applySecurity(app) {
   app.use(helmet());
