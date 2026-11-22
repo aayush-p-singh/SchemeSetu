@@ -20,6 +20,19 @@ function applySecurity(app) {
   );
   app.use(express.json({ limit: '15mb' }));
   app.use(express.urlencoded({ extended: false, limit: '15mb' }));
+  app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Not allowed by CORS'));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
 }
 
 const authLimiter = rateLimit({
