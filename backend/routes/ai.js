@@ -13,15 +13,23 @@ const { evaluateScheme } = require('../services/eligibility');
 const SYSTEM_PROMPT =
   'You are SchemeMitra, a friendly assistant for SchemeSetu, a welfare and labour compliance platform in India. ' +
   'Reply in clean Markdown. Reply in the same language the user writes in: Hindi, Hinglish, or English. ' +
-  'Keep answers practical and concise. Do not ask for or repeat Aadhaar, bank account, or other sensitive personal numbers. ' +
+  'Keep answers practical and concise. Do not ask for or repeat national ID, bank account, or other sensitive personal numbers. ' +
   'Use the user context below only to personalise the answer.';
 
 const NO_SPEECH_REPLY =
   'I did not catch any speech. Please try speaking again, a little closer to the microphone.';
 
 const LOCALE_MAP = new Map([
+  ['hi', 'hi-IN'],
   ['hi-IN', 'hi-IN'],
+  ['en', 'en-IN'],
   ['en-IN', 'en-IN'],
+  ['mr', 'mr-IN'],
+  ['mr-IN', 'mr-IN'],
+  ['ta', 'ta-IN'],
+  ['ta-IN', 'ta-IN'],
+  ['bn', 'bn-IN'],
+  ['bn-IN', 'bn-IN'],
   ['hinglish', 'hi-IN'],
 ]);
 
@@ -46,14 +54,16 @@ function buildContext(user, matchedSchemes) {
 }
 
 async function callSarvam(messages) {
-  if (!config.SARVAM_API_KEY) {
+  const apiKey = config.SARVAM_API_KEY || process.env.SARVAM_API_KEY;
+  const baseUrl = (config.SARVAM_API_URL || process.env.SARVAM_API_URL || 'https://api.sarvam.ai').replace(/\/$/, '');
+  if (!apiKey) {
     throw new AppError('AI service is not configured', 503);
   }
-  const res = await fetch(`${config.SARVAM_API_URL}/v1/chat/completions`, {
+  const res = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'api-subscription-key': config.SARVAM_API_KEY,
+      'api-subscription-key': apiKey,
     },
     body: JSON.stringify({ model: 'sarvam-105b', messages, temperature: 0.4 }),
     signal: AbortSignal.timeout(30000),
@@ -106,13 +116,149 @@ function parseWav(buf) {
   return { fmt, data };
 }
 
+function stripMarkdownForTts(text) {
+  return String(text || '')
+    .replace(/[*_`#>~-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 480);
+}
+
+async function transcribeAudio(wavBuffer, locale) {
+  const gnaniKey = config.GNANI_API_KEY || process.env.GNANI_API_KEY;
+  const gnaniSttUrl = (config.GNANI_STT_URL || process.env.GNANI_STT_URL || '').trim();
+
+  if (gnaniKey && gnaniSttUrl) {
+    try {
+      const form = new FormData();
+      form.append('file', new Blob([wavBuffer], { type: 'audio/wav' }), 'query.wav');
+      form.append('language', locale);
+
+      const res = await fetch(gnaniSttUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${gnaniKey}`,
+          'api-key': gnaniKey,
+        },
+        body: form,
+        signal: AbortSignal.timeout(25000),
+      });
+
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const text =
+          data.transcript ||
+          data.text ||
+          data.asr_text ||
+          data?.results?.[0]?.transcript ||
+          '';
+        if (String(text).trim()) return String(text).trim();
+      }
+    } catch (err) {
+      console.warn('[ai/voice] Gnani STT fallback:', err.message);
+    }
+  }
+
+  const sarvamKey = config.SARVAM_API_KEY || process.env.SARVAM_API_KEY;
+  const sarvamUrl = (config.SARVAM_API_URL || process.env.SARVAM_API_URL || 'https://api.sarvam.ai').replace(/\/$/, '');
+  if (!sarvamKey) {
+    throw new AppError('Speech recognition service is not configured', 503);
+  }
+
+  const form = new FormData();
+  form.append('file', new Blob([wavBuffer], { type: 'audio/wav' }), 'query.wav');
+  form.append('language_code', locale);
+  form.append('model', 'saarika:v2.5');
+
+  const res = await fetch(`${sarvamUrl}/speech-to-text`, {
+    method: 'POST',
+    headers: { 'api-subscription-key': sarvamKey },
+    body: form,
+    signal: AbortSignal.timeout(25000),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new AppError(`STT failed (${res.status}): ${errText.slice(0, 120)}`, 502);
+  }
+
+  const data = await res.json();
+  return String(data.transcript || data.text || '').trim();
+}
+
+async function synthesizeSpeech(text, locale) {
+  const cleanText = stripMarkdownForTts(text);
+  if (!cleanText) return null;
+
+  const gnaniKey = config.GNANI_API_KEY || process.env.GNANI_API_KEY;
+  const gnaniTtsUrl = (config.GNANI_TTS_URL || process.env.GNANI_TTS_URL || '').trim();
+
+  if (gnaniKey && gnaniTtsUrl) {
+    try {
+      const res = await fetch(gnaniTtsUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${gnaniKey}`,
+          'api-key': gnaniKey,
+        },
+        body: JSON.stringify({ text: cleanText, language: locale }),
+        signal: AbortSignal.timeout(20000),
+      });
+
+      if (res.ok) {
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('audio')) {
+          const buf = Buffer.from(await res.arrayBuffer());
+          return { audio_base64: buf.toString('base64'), audio_mime: contentType.split(';')[0] };
+        }
+        const data = await res.json().catch(() => ({}));
+        const b64 = data.audio_base64 || data.audio || data?.audios?.[0];
+        if (b64) {
+          return { audio_base64: b64, audio_mime: data.audio_mime || 'audio/wav' };
+        }
+      }
+    } catch (err) {
+      console.warn('[ai/voice] Gnani TTS fallback:', err.message);
+    }
+  }
+
+  const sarvamKey = config.SARVAM_API_KEY || process.env.SARVAM_API_KEY;
+  const sarvamUrl = (config.SARVAM_API_URL || process.env.SARVAM_API_URL || 'https://api.sarvam.ai').replace(/\/$/, '');
+  if (!sarvamKey) return null;
+
+  try {
+    const res = await fetch(`${sarvamUrl}/text-to-speech`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-subscription-key': sarvamKey,
+      },
+      body: JSON.stringify({
+        inputs: [cleanText],
+        target_language_code: locale,
+        speaker: 'anushka',
+        model: 'bulbul:v2',
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    const b64 = data?.audios?.[0];
+    if (!b64) return null;
+    return { audio_base64: b64, audio_mime: 'audio/wav' };
+  } catch {
+    return null;
+  }
+}
+
 // ---------- live news helpers ----------
 
 const PIB_RSS_URL =
   process.env.PIB_RSS_URL || 'https://www.pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3';
 const NEWS_CACHE_MS = 60 * 60 * 1000;
 const NEWS_ITEM_LIMIT = 8;
-
 
 let newsCache = { data: null, expiresAt: 0 };
 
@@ -228,8 +374,8 @@ router.get('/news', requireAuth, async (req, res) => {
     newsCache = { data: FALLBACK_WELFARE_NEWS, expiresAt: Date.now() + 15 * 60 * 1000 };
     return res.json(FALLBACK_WELFARE_NEWS);
   }
-  
 });
+
 router.post('/chat', requireAuth, async (req, res, next) => {
   try {
     const message = String(req.body?.message || '').trim();
@@ -285,7 +431,56 @@ router.post('/chat', requireAuth, async (req, res, next) => {
   }
 });
 
+router.post(
+  '/voice',
+  requireAuth,
+  aiLimiter,
+  asyncHandler(async (req, res) => {
+    const rawBase64 = String(req.body?.audio_base64 || '').trim();
+    if (!rawBase64) {
+      throw new AppError('audio_base64 is required', 400);
+    }
 
+    const cleanBase64 = rawBase64.replace(/^data:audio\/[a-zA-Z0-9.+-]+;base64,/, '');
+    const wavBuffer = Buffer.from(cleanBase64, 'base64');
+    if (wavBuffer.length < 44) {
+      throw new AppError('Invalid WAV audio payload', 400);
+    }
 
+    const { fmt, data } = parseWav(wavBuffer);
+    if (!fmt || !data || data.end <= data.start) {
+      throw new AppError('Corrupt or empty WAV audio stream', 400);
+    }
+
+    const langKey = String(req.body?.language || 'hi').trim();
+    const locale = LOCALE_MAP.get(langKey) || 'hi-IN';
+
+    const transcript = await transcribeAudio(wavBuffer, locale);
+    if (!transcript) {
+      return res.json({
+        success: true,
+        transcript: '',
+        reply: NO_SPEECH_REPLY,
+      });
+    }
+
+    const userDoc = (await User.findById(req.user._id || req.user.id).lean()) || req.user;
+    const matched = await matchedSchemesFor(userDoc);
+    const messages = buildMessages(userDoc, matched, req.body?.history, transcript);
+    const reply = (await callSarvam(messages)) || 'I could not generate a response right now.';
+
+    let ttsAudio = null;
+    if (req.body?.tts !== false) {
+      ttsAudio = await synthesizeSpeech(reply, locale);
+    }
+
+    return res.json({
+      success: true,
+      transcript,
+      reply,
+      ...(ttsAudio || {}),
+    });
+  })
+);
 
 module.exports = router;
