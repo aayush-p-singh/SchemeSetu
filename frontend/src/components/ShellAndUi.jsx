@@ -511,7 +511,7 @@ export function SchemeMitra() {
   if (!user) return null;
 
   return (
-    <div className="fixed bottom-5 right-5 z-50">
+    <div className="fixed bottom-14 right-5 z-[60]">
       <AnimatePresence>
         {chatOpen && (
           <motion.div
