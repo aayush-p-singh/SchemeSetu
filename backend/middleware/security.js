@@ -12,7 +12,12 @@ function applySecurity(app) {
   app.use(helmet());
   app.use(
     cors({
-      origin: CORS_ORIGIN,
+      origin(origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+        return callback(new Error('Not allowed by CORS'));
+      },
       credentials: true,
       methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
@@ -20,19 +25,6 @@ function applySecurity(app) {
   );
   app.use(express.json({ limit: '15mb' }));
   app.use(express.urlencoded({ extended: false, limit: '15mb' }));
-  app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error('Not allowed by CORS'));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-  })
-);
 }
 
 const authLimiter = rateLimit({
@@ -59,4 +51,4 @@ const generalLimiter = rateLimit({
   message: { success: false, error: 'Too many requests, please try again later.' },
 });
 
-module.exports = { applySecurity, authLimiter, aiLimiter, generalLimiter, CORS_ORIGIN };
+module.exports = { applySecurity, authLimiter, aiLimiter, generalLimiter, allowedOrigins };
