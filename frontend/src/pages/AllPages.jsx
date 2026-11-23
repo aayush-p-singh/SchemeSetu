@@ -20,7 +20,7 @@ import {
   Briefcase,
   X,
 } from 'lucide-react';
-import { CreditCard, CheckCircle2 /* ...your existing icons */ } from 'lucide-react';
+import { CreditCard} from 'lucide-react';
 import {
   apiRequest,
   sanitizeField,
