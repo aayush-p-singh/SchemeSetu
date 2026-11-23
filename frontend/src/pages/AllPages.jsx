@@ -1814,6 +1814,11 @@ export function ContractorDashboard() {
   const [selectedSchemeId, setSelectedSchemeId] = useState('');
   const [bulkStatus, setBulkStatus] = useState('');
 
+  // Razorpay Pro Plan states
+  const [paying, setPaying] = useState(false);
+  const [isPro, setIsPro] = useState(user?.plan === 'pro');
+  const [payError, setPayError] = useState('');
+
   const [workerForm, setWorkerForm] = useState({
     name: '',
     phone: '',
@@ -1831,6 +1836,10 @@ export function ContractorDashboard() {
   });
   const [workerErrors, setWorkerErrors] = useState({});
   const [onboardError, setOnboardError] = useState('');
+
+  useEffect(() => {
+    if (user?.plan === 'pro') setIsPro(true);
+  }, [user?.plan]);
 
   const loadAll = async (q = '') => {
     try {
@@ -1857,6 +1866,57 @@ export function ContractorDashboard() {
     const t = setTimeout(() => loadAll(search), 250);
     return () => clearTimeout(t);
   }, [search]);
+
+  const handleUpgradeCheckout = async () => {
+    setPayError('');
+    if (!window.Razorpay) {
+      setPayError('Payment SDK not loaded. Refresh and try again.');
+      return;
+    }
+
+    try {
+      setPaying(true);
+      const order = await apiRequest('/payments/create-order', {
+        method: 'POST',
+        body: JSON.stringify({ amount: 999, plan: 'contractor_pro' }),
+      });
+
+      const rzp = new window.Razorpay({
+        key: order.keyId,
+        amount: order.amount,
+        currency: order.currency,
+        name: 'SchemeSetu',
+        description: 'Contractor Pro Compliance Plan (₹999/mo)',
+        order_id: order.orderId,
+        prefill: {
+          name: user?.name || '',
+          contact: user?.phone ? `+91${user.phone}` : '',
+        },
+        theme: { color: '#09090b' },
+        handler: async (response) => {
+          try {
+            await apiRequest('/payments/verify', {
+              method: 'POST',
+              body: JSON.stringify(response),
+            });
+            setIsPro(true);
+          } catch (verifyErr) {
+            setPayError(verifyErr.message || 'Payment verification failed');
+          }
+        },
+      });
+
+      rzp.on('payment.failed', (resp) => {
+        setPayError(resp?.error?.description || 'Payment failed or cancelled');
+      });
+
+      rzp.open();
+    } catch (err) {
+      setPayError(err.message || 'Unable to start checkout');
+    } finally {
+      setPaying(false);
+    }
+  };
 
   const toggleSelect = (id) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -1913,51 +1973,73 @@ export function ContractorDashboard() {
     <AppShell>
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-950">Contractor Workforce Hub</h1>
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-semibold tracking-tight text-zinc-950">Contractor Workforce Hub</h1>
+            {isPro && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700">
+                <CheckCircle2 className="w-3 h-3" /> Pro Active
+              </span>
+            )}
+          </div>
           <p className="text-xs text-zinc-500 mt-1">{user?.companyName || 'Site Compliance & Welfare Operations'}</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            type="button"
-            onClick={() =>
-              downloadContractorComplianceCsv({
-                workers,
-                kpis,
-                contractorName: user?.companyName || user?.name || 'Contractor Hub',
-              })
-            }
-            className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
-          >
-            Export CSV
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              printContractorComplianceSummary({
-                workers,
-                kpis,
-                contractorName: user?.companyName || user?.name || 'Contractor Hub',
-              })
-            }
-            className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
-          >
-            Print Audit
-          </button>
-          <button
-            onClick={() => setShowBulk(true)}
-            disabled={selectedIds.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-xs font-semibold text-zinc-900 hover:bg-zinc-50 disabled:opacity-40 cursor-pointer"
-          >
-            <Layers className="w-3.5 h-3.5 text-emerald-600" />
-            Bulk Enroll ({selectedIds.length})
-          </button>
-          <button
-            onClick={() => setShowOnboard(true)}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-zinc-950 px-4 py-2.5 text-xs font-semibold text-white hover:bg-zinc-800 cursor-pointer"
-          >
-            <UserPlus className="w-3.5 h-3.5" />
-            Onboard Worker
-          </button>
+
+        <div className="flex flex-col items-start sm:items-end gap-1.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {!isPro && (
+              <button
+                type="button"
+                onClick={handleUpgradeCheckout}
+                disabled={paying}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-600/30 bg-emerald-50 px-3.5 py-2.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 cursor-pointer"
+              >
+                <CreditCard className="w-3.5 h-3.5 text-emerald-700" />
+                <span>{paying ? 'Opening Checkout...' : 'Upgrade Pro (₹999/mo)'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() =>
+                downloadContractorComplianceCsv({
+                  workers,
+                  kpis,
+                  contractorName: user?.companyName || user?.name || 'Contractor Hub',
+                })
+              }
+              className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+            >
+              Export CSV
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                printContractorComplianceSummary({
+                  workers,
+                  kpis,
+                  contractorName: user?.companyName || user?.name || 'Contractor Hub',
+                })
+              }
+              className="rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 text-xs font-medium text-zinc-800 hover:bg-zinc-50 cursor-pointer"
+            >
+              Print Audit
+            </button>
+            <button
+              onClick={() => setShowBulk(true)}
+              disabled={selectedIds.length === 0}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-xs font-semibold text-zinc-900 hover:bg-zinc-50 disabled:opacity-40 cursor-pointer"
+            >
+              <Layers className="w-3.5 h-3.5 text-emerald-600" />
+              Bulk Enroll ({selectedIds.length})
+            </button>
+            <button
+              onClick={() => setShowOnboard(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-zinc-950 px-4 py-2.5 text-xs font-semibold text-white hover:bg-zinc-800 cursor-pointer"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              Onboard Worker
+            </button>
+          </div>
+          {payError && <span className="text-[11px] text-rose-600">{payError}</span>}
         </div>
       </div>
 

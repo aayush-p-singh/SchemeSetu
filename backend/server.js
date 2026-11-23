@@ -25,7 +25,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/laborer', require('./routes/laborer'));
 app.use('/api/contractor', require('./routes/contractor'));
 app.use('/api/ai', require('./routes/ai'));
-
+app.use('/api/payments', require('./routes/payments'));
 app.use(notFound);
 app.use(errorHandler);
 
